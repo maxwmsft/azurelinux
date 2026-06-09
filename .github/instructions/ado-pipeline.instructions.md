@@ -192,6 +192,25 @@ Symptom that you need this: `ERR Error: this command may not be run as root`.
 
 This is NOT safe for general use, only for disposable CI environments.
 
+### Reading ADO build metadata (control plane)
+
+To read the pipeline's own control-plane data (build history, definitions) from a helper script, use the official [`azure-devops`](https://github.com/microsoft/azure-devops-python-api) SDK rather than a hand-rolled REST client. Pin it in the area's `requirements.txt` and install it through the standard `PipAuthenticate@1` + `pip install` step.
+
+Authenticate with the pipeline's `System.AccessToken`, which the ADO REST API accepts as a PAT-equivalent credential via the SDK's documented `BasicAuthentication` pattern:
+
+```python
+from azure.devops.connection import Connection
+from msrest.authentication import BasicAuthentication
+
+connection = Connection(base_url=collection_uri, creds=BasicAuthentication("", access_token))
+build_client = connection.clients.get_build_client()
+```
+
+- This is the ADO **control plane** (the pipeline's own builds/repos), **not** Azure Resource Manager or Control Tower — so the Workload Identity Federation service-connection rule does **not** apply. The build identity is the correct least-privilege caller.
+- Map the token in via the step `env:` block (`SYSTEM_ACCESSTOKEN: $(System.AccessToken)`), never on the command line. In a **YAML** pipeline there is no "Allow scripts to access the OAuth token" toggle (that is Classic-only) — the `env:` mapping is all that is needed.
+- Reading builds of the pipeline's **own** definition in the same project is covered by the default **project** job-authorization scope and the `{Project} Build Service ({Org})` identity's default build-read permission. Only revisit if your org has tightened the defaults.
+- Because the SDK is a pip dependency (not stdlib), any step that imports it MUST run **after** the dependency-install step (which itself follows `PipAuthenticate@1`).
+
 ## Security hardening
 
 Apply all of these unless there is a documented reason not to:
