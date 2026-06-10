@@ -83,6 +83,9 @@ kept in lockstep with `gnupg2`.
 %make_build
 
 %install
+ln -sf gpg2.1 doc/gpg.1
+ln -sf gpgv2.1 doc/gpgv.1
+
 %make_install
 
 # This spec is scoped to dirmngr only. Prune every file produced by the
