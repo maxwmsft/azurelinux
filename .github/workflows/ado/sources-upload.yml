@@ -1,25 +1,22 @@
 # Microsoft Corporation
 #
-# Wrapper pipeline — passed to ADO as the entry point. This file owns all
-# OneBranch-specific wiring (governed templates repo, Official vs NonOfficial
-# variant, featureFlags) and delegates the actual stages/jobs/steps to the
-# raw stages template at:
+# Wrapper pipeline — passed to ADO as the entry point for the source-upload
+# pipeline. This file owns all OneBranch-specific wiring (governed templates
+# repo, Official vs NonOfficial variant, featureFlags) and delegates the actual
+# stages/jobs/steps to the raw stages template at:
 #   .github/workflows/ado/templates/sources-upload-stages.yml
 #
 # Authenticates via Workload Identity Federation (OIDC) and calls the Control
-# Tower APIs to:
-#   1. Trigger v1 post-merge delta build (stopgap until source upload is reworked):
-#     1. Resolve the (target, source) commit range for this push from the
-#        previous CI build (ADO Builds REST API).
-#     2. Submit official package builds for the components that changed across
-#        that range, via Workload Identity Federation (OIDC) to Control Tower.
+# Tower 'prcheck' API to upload changed component sources. prcheck returns early
+# (no upload) on pull-request triggers -- unmerged code should not consume
+# capacity.
 #
-# The "source upload" (prcheck) step is DISABLED in the stages template — the
-# run_prcheck.py script is retained for when source upload returns.
+# The setup + change-detection + validation steps are shared with the
+# package-build pipeline via templates/steps/common-steps.yml.
 #
 # Helper scripts live under:
 # - scripts/ci/control-tower/ - (Control Tower-specific)
-# - scripts/ci/ado/ -  (ADO REST: commit-range detection)
+# - scripts/ci/ado/ -  (ADO API: commit-range detection)
 # - scripts/ci/components/ - (cross-pipeline azldev helpers shared with the GH Actions PR gates).
 #
 # Prerequisites (ADO / Azure Portal):
@@ -75,13 +72,11 @@ extends:
       - template: /.github/workflows/ado/templates/sources-upload-stages.yml@self
         parameters:
           outputDirectory: $(Build.ArtifactStagingDirectory)/output
-          artifactBaseName: prcheck
+          artifactBaseName: sourceupload
           containerImage: mcr.microsoft.com/onebranch/azurelinux/build:3.0
           poolType: linux
           serviceConnection: CT-Endpoints-Access-ServiceConnection-DEV
           variableGroup: ControlTower-PRCheck
-          # Control Tower package target for the 4.0 branch.
-          packageTarget: azl4
-          # Must exceed the script's --poll-timeout-seconds (default 600s = 10m)
+          # Must exceed the script's --poll-timeout-seconds (default 7200s = 120m)
           # with enough headroom for setup steps and the final API call.
-          timeoutInMinutes: 60
+          timeoutInMinutes: 150
