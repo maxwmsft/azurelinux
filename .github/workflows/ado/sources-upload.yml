@@ -80,6 +80,8 @@ extends:
           poolType: linux
           serviceConnection: CT-Endpoints-Access-ServiceConnection-DEV
           variableGroup: ControlTower-PRCheck
+          # Control Tower package target for the 4.0 branch.
+          packageTarget: azl4
           # Must exceed the script's --poll-timeout-seconds (default 600s = 10m)
           # with enough headroom for setup steps and the final API call.
           timeoutInMinutes: 60

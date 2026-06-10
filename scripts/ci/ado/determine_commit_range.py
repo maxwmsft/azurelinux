@@ -187,7 +187,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--branch", required=True, help="Full source branch ref, e.g. refs/heads/4.0.")
     parser.add_argument("--source-commit", required=True, help="The triggering commit SHA (Build.SourceVersion).")
     parser.add_argument("--repo-uri", required=True, help="Remote URL to fetch commit objects from.")
-    parser.add_argument("--top", type=int, default=20, help="How many recent builds to inspect.")
+    parser.add_argument("--top", type=int, default=100, help="How many recent builds to inspect.")
     return parser.parse_args()
 
 

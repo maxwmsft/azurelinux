@@ -25,6 +25,10 @@ parameters:
     type: string
   - name: timeoutInMinutes
     type: number
+  # Control Tower package target for builds submitted from this pipeline
+  # (e.g. azl4 for the 4.0 branch)
+  - name: packageTarget
+    type: string
 
 stages:
   - stage: Integration
@@ -279,7 +283,7 @@ stages:
                   --api-base-url "$API_BASE_URL" \
                   --build-reason "$CT_BUILD_REASON" \
                   --changed-components-file "$CHANGED_COMPONENTS_FILE" \
-                  --package-target azl4 \
+                  --package-target ${{ parameters.packageTarget }} \
                   --official-build \
                   --commit-sha "$SOURCE_COMMIT" \
                   --repo-uri "$UPSTREAM_REPO_URL"
