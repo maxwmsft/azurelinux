@@ -23,12 +23,30 @@
 #     succeeded -- e.g. the render step trusts that "Prepare change set" ran and
 #     set renderSetFile to a real path.
 #
-# The six steps below are identical across both pipelines: authenticate + install
-# dependencies, resolve the (target, source) commit range, and validate (lock
-# files + rendered specs). The pipeline-specific Control Tower call (package
-# build or prcheck) is appended by the including stages template.
+# The steps below are identical across both pipelines: ensure full git history,
+# authenticate + install dependencies, resolve the (target, source) commit
+# range, and validate (lock files + rendered specs). The pipeline-specific
+# Control Tower call (package build or prcheck) is appended by the including
+# stages template.
 
 steps:
+  # Ensure the full git history is present, ONCE, before anything that needs it.
+  # The OneBranch checkout may be shallow (depth 1), but lock resolution, spec
+  # rendering (rpmautospec derives Release/changelog from `git log` over the
+  # lock files), and commit-range detection all require the complete history.
+  # Doing the unshallow here means the helper scripts can assume full history
+  # and never fetch themselves -- a `git fetch --depth=N` inside a script would
+  # re-shallow a full clone, which silently corrupts the rpmautospec Release
+  # calculation (and is a footgun when running the scripts locally).
+  - script: |
+      set -euo pipefail
+      if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+        echo "##[group]Fetching full git history"
+        git fetch --unshallow
+        echo "##[endgroup]"
+      fi
+    displayName: "Ensure full git history"
+
   - task: PipAuthenticate@1
     displayName: "Authenticate pip"
     inputs:
@@ -81,8 +99,7 @@ steps:
         --definition-id "$SYSTEM_DEFINITIONID" \
         --current-build-id "$BUILD_BUILDID" \
         --branch "$DELTA_QUERY_BRANCH" \
-        --source-commit "$BUILD_SOURCEVERSION" \
-        --repo-uri "$BUILD_REPOSITORY_URI")"
+        --source-commit "$BUILD_SOURCEVERSION")"
       echo "$range_output"
 
       source_commit="$(sed -n 's/^sourceCommit=//p' <<< "$range_output")"
@@ -102,7 +119,6 @@ steps:
       BUILD_BUILDID: $(Build.BuildId)
       DELTA_QUERY_BRANCH: $(Build.SourceBranch)
       BUILD_SOURCEVERSION: $(Build.SourceVersion)
-      BUILD_REPOSITORY_URI: $(Build.Repository.Uri)
     displayName: "Determine source and target commit range"
 
   # Verify lock files are current. --check-only validates without

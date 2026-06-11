@@ -1,6 +1,6 @@
 """Resolve the ``(target, source)`` commit range for a post-merge delta build.
 
-Strategy (see ``.github/workflows/ado/templates/sources-upload-stages.yml``):
+Strategy (see ``.github/workflows/ado/templates/steps/common-steps.yml``):
 
 * ``source`` is the commit that triggered this run (``Build.SourceVersion``).
 * ``target`` is the ``sourceVersion`` of the immediately-preceding CI build of
@@ -28,6 +28,11 @@ The resolved hashes are printed to stdout as two ``key=value`` lines
 reads them and sets the corresponding ADO pipeline variables, so the
 variable wiring stays visible in the YAML rather than hidden here. All
 diagnostic output goes to stderr to keep stdout machine-readable.
+
+This script is read-only with respect to git: it assumes the full history is
+already present (the pipeline fetches it up front in a single "Ensure full git
+history" step) and never fetches itself. A ``git fetch --depth=N`` here would
+re-shallow a full clone -- a footgun, especially when running locally.
 """
 
 from __future__ import annotations
@@ -84,32 +89,12 @@ def _commit_present(commit: str) -> bool:
     return _run_git(["cat-file", "-e", f"{commit}^{{commit}}"]).returncode == 0
 
 
-def _ensure_commit(commit: str, repo_uri: str) -> bool:
-    """Make ``commit`` available locally, fetching it if necessary.
+def _parent_commit(commit: str) -> str | None:
+    """Return ``commit^1`` (40-hex), or None if it cannot be resolved.
 
-    The OneBranch checkout may be shallow, so fetch the single commit object
-    (depth 1 — its tree and blobs, with no ancestors, which is all a two-point
-    tree diff needs).
-
-    Args:
-        commit: 40-hex commit SHA to ensure is present.
-        repo_uri: Remote URL to fetch from.
-
-    Returns:
-        True if the commit is present afterwards, False otherwise.
+    Assumes full history is present (the pipeline fetches it up front), so no
+    fetch is performed here.
     """
-    if _commit_present(commit):
-        return True
-    fetch = _run_git(["fetch", "--no-tags", "--depth=1", repo_uri, commit])
-    if fetch.returncode != 0:
-        _log(f"WARNING: Failed to fetch commit {commit}: {fetch.stderr.strip()}")
-        return False
-    return _commit_present(commit)
-
-
-def _parent_commit(commit: str, repo_uri: str) -> str | None:
-    """Return ``commit^1`` (40-hex), fetching depth 2 so the parent is present."""
-    _run_git(["fetch", "--no-tags", "--depth=2", repo_uri, commit])
     result = _run_git(["rev-parse", "--verify", "--quiet", f"{commit}^1"])
     parent = result.stdout.strip()
     if result.returncode != 0 or not _SHA_RE.match(parent):
@@ -186,7 +171,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--current-build-id", type=int, required=True, help="Id of the running build.")
     parser.add_argument("--branch", required=True, help="Full source branch ref, e.g. refs/heads/4.0.")
     parser.add_argument("--source-commit", required=True, help="The triggering commit SHA (Build.SourceVersion).")
-    parser.add_argument("--repo-uri", required=True, help="Remote URL to fetch commit objects from.")
     parser.add_argument("--top", type=int, default=100, help="How many recent builds to inspect.")
     return parser.parse_args()
 
@@ -200,7 +184,6 @@ def main() -> int:
         _log(f"ERROR: --source-commit is not a 40-character hex SHA: {source_commit!r}")
         return 1
 
-    repo_uri = str(args.repo_uri)
     target_commit: str | None = None
 
     try:
@@ -219,20 +202,21 @@ def main() -> int:
             "the tip commit (target = source^1). The weekly true-up job covers "
             "any gap."
         )
-        target_commit = _parent_commit(source_commit, repo_uri)
+        target_commit = _parent_commit(source_commit)
         if target_commit is None:
             _log("ERROR: Unable to determine a parent of the source commit; cannot compute a build range.")
             return 1
         _emit_range(source_commit, target_commit)
         return 0
 
-    # Make both endpoints available for the downstream tree diff in the
-    # change-set step. Best-effort: a fetch failure is surfaced as a warning
-    # rather than failing this best-effort pipeline outright.
-    if not _ensure_commit(target_commit, repo_uri) or not _ensure_commit(source_commit, repo_uri):
+    # Both endpoints must be present for the downstream tree diff in the
+    # change-set step. Full history is fetched once by the pipeline before this
+    # step runs, so we only sanity-check presence here (no fetching).
+    missing = [commit for commit in (target_commit, source_commit) if not _commit_present(commit)]
+    if missing:
         _log(
-            f"WARNING: Could not make both commits available locally (target={target_commit}, "
-            f"source={source_commit}); the change-set step may be unable to diff them."
+            f"WARNING: commit(s) not present locally: {', '.join(missing)}; the change-set step may be "
+            "unable to diff them. Ensure the full git history was fetched before this step."
         )
 
     _emit_range(source_commit, target_commit)

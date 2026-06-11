@@ -23,8 +23,11 @@ build metadata) from ADO YAML pipelines, using the official
 `determine_commit_range.py` expects:
 
 - **Args:** `--definition-id`, `--current-build-id`, `--branch` (full ref, e.g.
-  `refs/heads/4.0`), `--source-commit`, `--repo-uri`, optional `--top`.
+  `refs/heads/4.0`), `--source-commit`, optional `--top`.
 - **Env:** `SYSTEM_COLLECTIONURI`, `SYSTEM_TEAMPROJECT`, `SYSTEM_ACCESSTOKEN`.
+- **Git:** read-only. It assumes the full history is already present (the
+  pipeline's "Ensure full git history" step fetches it once up front) and never
+  fetches — a `git fetch --depth=N` would re-shallow a full clone.
 - **Output:** two `key=value` lines on **stdout** (`sourceCommit=<sha>` and
   `targetCommit=<sha>`); all diagnostics go to **stderr**. The caller parses
   stdout and owns the `##vso[task.setvariable]` wiring, so pipeline-variable
@@ -37,5 +40,6 @@ found for the fallback) exits non-zero so the calling step fails.
 
 ## Callers
 
-- `sources-upload-stages.yml` "Determine source and target commit range" step →
-  `determine_commit_range.py`
+- `templates/steps/common-steps.yml` "Determine source and target commit range"
+  step → `determine_commit_range.py` (shared by the package-build and
+  source-upload pipelines).
