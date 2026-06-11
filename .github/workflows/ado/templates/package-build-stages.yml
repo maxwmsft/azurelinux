@@ -70,20 +70,30 @@ stages:
               inlineScript: |
                 set -euo pipefail
 
+                # >>> TEST HACK (branch: test_delta_v1) >>>
+                # Submit SCRATCH builds while testing (drop --official-build ->
+                # run_package_build sets isScratchBuild = not --official-build).
+                # Keeps test runs out of the real feed + avoids NEVR collisions.
+                # DO NOT MERGE -- restore the `--official-build \` line.
+                # <<< TEST HACK <<<
                 python3 scripts/ci/control-tower/run_package_build.py \
                   --api-audience "$API_AUDIENCE" \
                   --api-base-url "$API_BASE_URL" \
                   --build-reason "$CT_BUILD_REASON" \
                   --changed-components-file "$CHANGED_COMPONENTS_FILE" \
                   --package-target ${{ parameters.packageTarget }} \
-                  --official-build \
                   --commit-sha "$SOURCE_COMMIT" \
                   --repo-uri "$UPSTREAM_REPO_URL"
             env:
               API_AUDIENCE: $(ApiAudience)
               API_BASE_URL: $(ApiBaseDirectUrl)
               # Non-reserved name: an `env:` override of the reserved BUILD_REASON var is silently ignored by the agent.
-              CT_BUILD_REASON: $(Build.Reason)
+              # >>> TEST HACK (branch: test_delta_v1) >>>
+              # Force a non-PullRequest reason so run_package_build.py does NOT
+              # skip submission on PR-triggered test runs. DO NOT MERGE --
+              # restore `CT_BUILD_REASON: $(Build.Reason)`.
+              CT_BUILD_REASON: IndividualCI
+              # <<< TEST HACK <<<
               CHANGED_COMPONENTS_FILE: $(changedComponentsFile)
               SOURCE_COMMIT: $(sourceCommit)
               UPSTREAM_REPO_URL: $(Build.Repository.Uri)
