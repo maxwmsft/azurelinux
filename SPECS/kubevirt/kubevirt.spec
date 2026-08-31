@@ -20,7 +20,7 @@
 Summary:        Container native virtualization
 Name:           kubevirt
 Version:        1.8.4
-Release:        1%{?dist}
+Release:        2%{?dist}
 License:        ASL 2.0
 Vendor:         Microsoft Corporation
 Distribution:   Azure Linux
@@ -46,6 +46,7 @@ Patch15:        CVE-2026-56852.patch
 Patch16:        0001-Add-LiveMigration-Blackout-Observability.patch
 Patch17:        0002-Fix-hotplug-volume-detach-deadlock-in-virt-handler.patch
 Patch18:        0003-Fix-cleanupAttachmentPods-fallback-keeping-useless-old-pods.patch
+Patch19:        0004-Propagate-launcher-pull-secret-to-hotplug-helper-pods.patch
  
 %global debug_package %{nil}
 BuildRequires:  swtpm-tools
@@ -300,6 +301,9 @@ install -p -m 0644 cmd/virt-launcher/qemu.conf %{buildroot}%{_datadir}/kube-virt
 %{_bindir}/virt-tests
 
 %changelog
+* Mon Aug 31 2026 Max Weiss <maxweiss@microsoft.com> - 1.8.4-2
+- Propagate the launcher pull secret to hotplug helper pods
+
 * Fri Aug 14 2026 Woojoong Kim <woojoongkim@microsoft.com> - 1.8.4-1
 - Enable Kubevirt Sidecar
 - Add hotplug volue patches
