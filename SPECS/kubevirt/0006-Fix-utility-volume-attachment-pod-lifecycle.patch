@@ -1,0 +1,407 @@
+From c6b5f2bc34dfa083c7ff10b4f04ca7752aefc6fb Mon Sep 17 00:00:00 2001
+From: Alexander Wels <awels@redhat.com>
+Date: Tue, 18 Aug 2026 07:27:30 -0500
+Subject: [PATCH] Fix utility volume attachment pod lifecycle during hotplug
+
+Keep utility volume mounts when expanding attachment pods and only
+delete the old pod once the replacement is running with the same PVCs.
+
+Rebase insertion context onto Azure Linux's existing fallback-cleanup
+backport without changing the upstream implementation or regression tests.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+Signed-off-by: Alexander Wels <awels@redhat.com>
+---
+ pkg/virt-controller/services/template.go      |  12 +-
+ pkg/virt-controller/services/template_test.go |  74 ++++++++
+ pkg/virt-controller/watch/vmi/vmi_test.go     | 176 ++++++++++++++++++
+ .../watch/vmi/volume-hotplug.go               |  53 +++++-
+ 4 files changed, 308 insertions(+), 7 deletions(-)
+
+diff --git a/pkg/virt-controller/services/template.go b/pkg/virt-controller/services/template.go
+index b142da9e1..979199650 100644
+--- a/pkg/virt-controller/services/template.go
++++ b/pkg/virt-controller/services/template.go
+@@ -1174,10 +1174,14 @@ func (t *TemplateService) RenderHotplugAttachmentPodTemplate(volumes []*v1.Volum
+ 		if claimName == "" {
+ 			continue
+ 		}
+-		skipMount := false
+-		if hotplugVolumeStatusMap[volume.Name] == v1.VolumeReady || hotplugVolumeStatusMap[volume.Name] == v1.HotplugVolumeMounted {
+-			skipMount = true
+-		}
++		// Skip container mounts for regular hotplug volumes already served by the old
++		// attachment pod (VolumeReady or HotplugVolumeMounted). Utility volumes always
++		// need a mount in the replacement pod so virt-handler can bind-mount when the
++		// volume set expands. Skipping during HotplugVolumeMounted avoids duplicate
++		// container mounts on overlapping attachment pods (same node as virt-launcher)
++		// while the disk is still attaching via the old pod.
++		phase := hotplugVolumeStatusMap[volume.Name]
++		skipMount := !types.IsUtilityVolume(vmi, volume.Name) && (phase == v1.VolumeReady || phase == v1.HotplugVolumeMounted)
+ 		pod.Spec.Volumes = append(pod.Spec.Volumes, k8sv1.Volume{
+ 			Name: volume.Name,
+ 			VolumeSource: k8sv1.VolumeSource{
+diff --git a/pkg/virt-controller/services/template_test.go b/pkg/virt-controller/services/template_test.go
+index baf1dd3cf..c8065be6b 100644
+--- a/pkg/virt-controller/services/template_test.go
++++ b/pkg/virt-controller/services/template_test.go
+@@ -4771,6 +4771,80 @@ var _ = Describe("Template", func() {
+ 			Expect(pod.Spec.Tolerations).To(BeEquivalentTo(vmi.Spec.Tolerations))
+ 		})
+ 
++		DescribeTable("should mount filesystem hotplug volumes based on volume phase",
++			func(phase v1.VolumePhase, isUtility bool, expectVolumeMount bool) {
++				vmi := api.NewMinimalVMI("fake-vmi")
++				if isUtility {
++					vmi.Spec.UtilityVolumes = []v1.UtilityVolume{
++						{
++							Name: "testVolume",
++							PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
++								ClaimName: "pvcDevice",
++							},
++						},
++					}
++				}
++				vmi.Status.VolumeStatus = []v1.VolumeStatus{
++					{
++						Name:          "testVolume",
++						Phase:         phase,
++						HotplugVolume: &v1.HotplugVolumeStatus{},
++					},
++				}
++				ownerPod, err := svc.RenderLaunchManifest(vmi)
++				Expect(err).ToNot(HaveOccurred())
++
++				vmi.Status.SelinuxContext = "test_u:test_r:test_t:s0"
++
++				volumeName := "testVolume"
++				pvcName := "pvcDevice"
++				namespace := "testns"
++				mode := k8sv1.PersistentVolumeFilesystem
++				pvc := k8sv1.PersistentVolumeClaim{
++					TypeMeta:   metav1.TypeMeta{Kind: "PersistentVolumeClaim", APIVersion: "v1"},
++					ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: pvcName},
++					Spec: k8sv1.PersistentVolumeClaimSpec{
++						VolumeMode: &mode,
++					},
++				}
++				claimMap := map[string]*k8sv1.PersistentVolumeClaim{volumeName: &pvc}
++				volumes := []*v1.Volume{
++					{
++						Name: volumeName,
++						VolumeSource: v1.VolumeSource{
++							PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
++								PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
++									ClaimName: pvcName,
++								},
++							},
++						},
++					},
++				}
++
++				pod, err := svc.RenderHotplugAttachmentPodTemplate(volumes, ownerPod, vmi, claimMap)
++				Expect(err).ToNot(HaveOccurred())
++
++				prop := k8sv1.MountPropagationHostToContainer
++				expectedMounts := []k8sv1.VolumeMount{
++					{
++						Name:             "hotplug-disks",
++						MountPath:        "/path",
++						MountPropagation: &prop,
++					},
++				}
++				if expectVolumeMount {
++					expectedMounts = append(expectedMounts, k8sv1.VolumeMount{
++						Name:      volumeName,
++						MountPath: "/" + volumeName,
++					})
++				}
++				Expect(pod.Spec.Containers[0].VolumeMounts).To(Equal(expectedMounts))
++			},
++			Entry("utility volume at HotplugVolumeMounted", v1.HotplugVolumeMounted, true, true),
++			Entry("regular hotplug volume at HotplugVolumeMounted", v1.HotplugVolumeMounted, false, false),
++			Entry("regular hotplug volume at VolumeReady", v1.VolumeReady, false, false),
++		)
++
+ 		It("should compute the correct volumeDevice context when rendering hotplug attachment pods with the FS PersistentVolumeClaim", func() {
+ 			vmi := api.NewMinimalVMI("fake-vmi")
+ 			ownerPod, err := svc.RenderLaunchManifest(vmi)
+diff --git a/pkg/virt-controller/watch/vmi/vmi_test.go b/pkg/virt-controller/watch/vmi/vmi_test.go
+index 695a0abc1..c3201e0a2 100644
+--- a/pkg/virt-controller/watch/vmi/vmi_test.go
++++ b/pkg/virt-controller/watch/vmi/vmi_test.go
+@@ -4371,6 +4371,182 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
+ 			Expect(err).ToNot(HaveOccurred())
+ 			// No deletion event expected — pod has volume in deletion-blocking phase
+ 		})
++
++		DescribeTable("should clean up utility volume attachment pods when replacement pod is running",
++			func(includeUtilityPVC bool, includeUtilityMount bool, expectDelete bool) {
++				vmi := watchtesting.NewRunningVirtualMachine("testvmi", &k8sv1.Node{
++					ObjectMeta: metav1.ObjectMeta{
++						Name: "testnode",
++					},
++				})
++				vmi.Spec.UtilityVolumes = []virtv1.UtilityVolume{
++					{
++						Name: "utility-vol",
++						PersistentVolumeClaimVolumeSource: k8sv1.PersistentVolumeClaimVolumeSource{
++							ClaimName: "utility-pvc",
++						},
++					},
++				}
++				vmi.Status.VolumeStatus = []virtv1.VolumeStatus{
++					{
++						Name:  "utility-vol",
++						Phase: virtv1.HotplugVolumeMounted,
++						HotplugVolume: &virtv1.HotplugVolumeStatus{
++							AttachPodName: "new-pod",
++							AttachPodUID:  "new-uid",
++						},
++					},
++				}
++
++				oldPod := &k8sv1.Pod{
++					ObjectMeta: metav1.ObjectMeta{
++						Name:      "old-pod",
++						Namespace: vmi.Namespace,
++					},
++					Spec: k8sv1.PodSpec{
++						Volumes: []k8sv1.Volume{
++							{
++								Name: "utility-vol",
++								VolumeSource: k8sv1.VolumeSource{
++									PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
++										ClaimName: "utility-pvc",
++									},
++								},
++							},
++						},
++					},
++					Status: k8sv1.PodStatus{
++						Phase: k8sv1.PodRunning,
++					},
++				}
++
++				currentPodSpec := k8sv1.PodSpec{
++					Volumes: []k8sv1.Volume{
++						{
++							Name: "hotplug-vol",
++							VolumeSource: k8sv1.VolumeSource{
++								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
++									ClaimName: "hotplug-pvc",
++								},
++							},
++						},
++					},
++				}
++				if includeUtilityPVC {
++					currentPodSpec.Volumes = append([]k8sv1.Volume{
++						{
++							Name: "utility-vol",
++							VolumeSource: k8sv1.VolumeSource{
++								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
++									ClaimName: "utility-pvc",
++								},
++							},
++						},
++					}, currentPodSpec.Volumes...)
++				}
++				if includeUtilityMount {
++					currentPodSpec.Containers = []k8sv1.Container{
++						{
++							Name: "hotplug-disk",
++							VolumeMounts: []k8sv1.VolumeMount{
++								{
++									Name:      "utility-vol",
++									MountPath: "/utility-vol",
++								},
++							},
++						},
++					}
++				}
++				currentPod := &k8sv1.Pod{
++					ObjectMeta: metav1.ObjectMeta{
++						Name:      "new-pod",
++						Namespace: vmi.Namespace,
++					},
++					Spec: currentPodSpec,
++					Status: k8sv1.PodStatus{
++						Phase: k8sv1.PodRunning,
++					},
++				}
++
++				addPod(oldPod)
++
++				err := controller.cleanupAttachmentPods(currentPod, []*k8sv1.Pod{oldPod}, vmi, 2)
++				Expect(err).ToNot(HaveOccurred())
++				if expectDelete {
++					testutils.ExpectEvent(recorder, kvcontroller.SuccessfulDeletePodReason)
++					expectPodDoesNotExist(oldPod.Namespace, oldPod.Name)
++				} else {
++					expectPodExists(oldPod.Namespace, oldPod.Name)
++				}
++			},
++			Entry("delete when replacement exposes utility volume", true, true, true),
++			Entry("keep when replacement is missing utility volume", false, false, false),
++			Entry("keep when replacement has utility PVC without container mount", true, false, false),
++		)
++
++		DescribeTable("volumeHandledByCurrentPod",
++			func(currentPod *k8sv1.Pod, volumeName string, specVolumes map[string]struct{}, expected bool) {
++				Expect(volumeHandledByCurrentPod(volumeName, currentPod, specVolumes)).To(Equal(expected))
++			},
++			Entry("nil pod", nil, "vol", map[string]struct{}{"vol": {}}, false),
++			Entry("pending pod", &k8sv1.Pod{Status: k8sv1.PodStatus{Phase: k8sv1.PodPending}}, "vol", map[string]struct{}{"vol": {}}, false),
++			Entry("volume not in spec map", &k8sv1.Pod{Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning}}, "vol", map[string]struct{}{}, false),
++			Entry("pvc without container mount", &k8sv1.Pod{
++				Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning},
++				Spec: k8sv1.PodSpec{
++					Volumes: []k8sv1.Volume{
++						{
++							Name: "vol",
++							VolumeSource: k8sv1.VolumeSource{
++								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
++							},
++						},
++					},
++				},
++			}, "vol", map[string]struct{}{"vol": {}}, false),
++			Entry("pvc with volume mount", &k8sv1.Pod{
++				Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning},
++				Spec: k8sv1.PodSpec{
++					Containers: []k8sv1.Container{
++						{
++							Name: "hotplug-disk",
++							VolumeMounts: []k8sv1.VolumeMount{
++								{Name: "vol", MountPath: "/vol"},
++							},
++						},
++					},
++					Volumes: []k8sv1.Volume{
++						{
++							Name: "vol",
++							VolumeSource: k8sv1.VolumeSource{
++								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
++							},
++						},
++					},
++				},
++			}, "vol", map[string]struct{}{"vol": {}}, true),
++			Entry("pvc with volume device", &k8sv1.Pod{
++				Status: k8sv1.PodStatus{Phase: k8sv1.PodRunning},
++				Spec: k8sv1.PodSpec{
++					Containers: []k8sv1.Container{
++						{
++							Name: "hotplug-disk",
++							VolumeDevices: []k8sv1.VolumeDevice{
++								{Name: "vol", DevicePath: "/path/vol/uid"},
++							},
++						},
++					},
++					Volumes: []k8sv1.Volume{
++						{
++							Name: "vol",
++							VolumeSource: k8sv1.VolumeSource{
++								PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{ClaimName: "pvc"},
++							},
++						},
++					},
++				},
++			}, "vol", map[string]struct{}{"vol": {}}, true),
++		)
+ 	})
+ 
+ 	Context("topology hints", func() {
+diff --git a/pkg/virt-controller/watch/vmi/volume-hotplug.go b/pkg/virt-controller/watch/vmi/volume-hotplug.go
+index 9aa60f8b9..d909ca893 100644
+--- a/pkg/virt-controller/watch/vmi/volume-hotplug.go
++++ b/pkg/virt-controller/watch/vmi/volume-hotplug.go
+@@ -84,13 +84,16 @@ func (c *Controller) cleanupAttachmentPods(currentPod *k8sv1.Pod, oldPods []*k8s
+ 		}
+ 	}
+ 
+-	specHotplugVolumes := make(map[string]struct{})
++	specAttachmentVolumes := make(map[string]struct{})
+ 	for _, vmiVolume := range vmi.Spec.Volumes {
+ 		if storagetypes.IsHotplugVolume(&vmiVolume) {
+-			specHotplugVolumes[vmiVolume.Name] = struct{}{}
++			specAttachmentVolumes[vmiVolume.Name] = struct{}{}
+ 			delete(statusMap, vmiVolume.Name)
+ 		}
+ 	}
++	for _, utilityVolume := range vmi.Spec.UtilityVolumes {
++		specAttachmentVolumes[utilityVolume.Name] = struct{}{}
++	}
+ 
+ 	currentPodIsNotRunning := currentPod == nil || currentPod.Status.Phase != k8sv1.PodRunning
+ 	for _, attachmentPod := range oldPods {
+@@ -98,13 +101,19 @@ func (c *Controller) cleanupAttachmentPods(currentPod *k8sv1.Pod, oldPods []*k8s
+ 			attachmentPod.Status.Phase == k8sv1.PodRunning && attachmentPod.DeletionTimestamp == nil &&
+ 			numReadyVolumes > 0 &&
+ 			currentPodIsNotRunning &&
+-			podContainsVolumesToPreserve(attachmentPod, statusMap, specHotplugVolumes) {
++			podContainsVolumesToPreserve(attachmentPod, statusMap, specAttachmentVolumes) {
+ 			foundRunning = true
+ 			continue
+ 		}
+ 		volumesNotReadyForDelete := 0
+ 
+ 		for _, podVolume := range attachmentPod.Spec.Volumes {
++			if podVolume.PersistentVolumeClaim == nil {
++				continue
++			}
++			if volumeHandledByCurrentPod(podVolume.Name, currentPod, specAttachmentVolumes) {
++				continue
++			}
+ 			volumeStatus, ok := statusMap[podVolume.Name]
+ 			if ok && !volumeReadyForPodDelete(volumeStatus.Phase) {
+ 				volumesNotReadyForDelete++
+@@ -135,6 +144,44 @@ func volumeReadyForPodDelete(phase v1.VolumePhase) bool {
+ 	return true
+ }
+ 
++func volumeHandledByCurrentPod(volumeName string, currentPod *k8sv1.Pod, specAttachmentVolumes map[string]struct{}) bool {
++	if currentPod == nil || currentPod.Status.Phase != k8sv1.PodRunning {
++		return false
++	}
++	if _, inSpec := specAttachmentVolumes[volumeName]; !inSpec {
++		return false
++	}
++	volumeInPodSpec := false
++	for _, podVolume := range currentPod.Spec.Volumes {
++		if podVolume.PersistentVolumeClaim != nil && podVolume.Name == volumeName {
++			volumeInPodSpec = true
++			break
++		}
++	}
++	if !volumeInPodSpec {
++		return false
++	}
++	return podVolumeExposedToContainer(currentPod, volumeName)
++}
++
++func podVolumeExposedToContainer(pod *k8sv1.Pod, volumeName string) bool {
++	if len(pod.Spec.Containers) == 0 {
++		return false
++	}
++	container := pod.Spec.Containers[0]
++	for _, mount := range container.VolumeMounts {
++		if mount.Name == volumeName {
++			return true
++		}
++	}
++	for _, device := range container.VolumeDevices {
++		if device.Name == volumeName {
++			return true
++		}
++	}
++	return false
++}
++
+ func (c *Controller) isUtilityVolumeWithBlockPVC(vmi *v1.VirtualMachineInstance, volume *v1.Volume) (bool, error) {
+ 	isUtilityVolume := false
+ 	for _, utilityVolume := range vmi.Spec.UtilityVolumes {
+-- 
+2.56.1
+

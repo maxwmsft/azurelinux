@@ -20,7 +20,7 @@
 Summary:        Container native virtualization
 Name:           kubevirt
 Version:        1.8.4
-Release:        6%{?dist}
+Release:        7%{?dist}
 License:        ASL 2.0
 Vendor:         Microsoft Corporation
 Distribution:   Azure Linux
@@ -50,6 +50,8 @@ Patch18:        0002-Fix-hotplug-volume-detach-deadlock-in-virt-handler.patch
 Patch19:        0003-Fix-cleanupAttachmentPods-fallback-keeping-useless-old-pods.patch
 Patch20:        0004-Propagate-launcher-pull-secret-to-hotplug-helper-pods.patch
 Patch21:        0005-virt-api-accept-large-identity-header-sets-with-Go-1.27.patch
+Patch22:        0006-Fix-utility-volume-attachment-pod-lifecycle.patch
+Patch23:        0007-Stage-hotplug-volume-handoffs.patch
 
 %global debug_package %{nil}
 BuildRequires:  swtpm-tools
@@ -307,6 +309,9 @@ install -p -m 0644 cmd/virt-launcher/qemu.conf %{buildroot}%{_datadir}/kube-virt
 %{_bindir}/virt-tests
 
 %changelog
+* Wed Nov 25 2026 Max Weiss <maxweiss@microsoft.com> - 1.8.4-7
+- Preserve utility volume mounts and stage hotplug handoffs while CSI is delayed
+
 * Mon Nov 23 2026 Woojoong Kim <woojoongkim@microsoft.com> - 1.8.4-6
 - Carry the five migration, hotplug and virt-api patches from Azure Linux PR 19696
 
